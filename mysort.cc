@@ -1,0 +1,546 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <limits.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <ctype.h>
+#include <pthread.h>
+#include <string.h>
+
+// all the data from file is in to_be_sort long long array
+
+// The Formula For Each Segment:
+    
+// x part, n numbers
+// n/x = base number for each part
+// n%x = residue after using n/x
+// adding the residue to each part
+// till the residue is zero again
+
+// constant
+#define NUM 1000000
+#define MAX LLONG_MAX
+// construct a struct for passing in arguments
+struct Foo{
+  long long *array_in;
+  unsigned int start_point;
+  unsigned int end_point;
+};
+// mutex lock
+pthread_mutex_t array_lock;
+// test function
+// count the non-zero element in the array
+int count_non_zero(long long array_to_be_count[])
+{
+  int count;
+  count = 0;
+  for(int i = 0; i < 1000000; i++){
+    if(array_to_be_count[i] != 0)
+      count++;
+  }
+  return count;
+}
+
+// bubble sort swap function
+void swap(long long *x, long long *y){
+  long long temp = *x;
+  *x = *y;
+  *y = temp;
+}
+
+// quick sort
+// this is used for benmarking large amount of data
+unsigned int partition (long long arr[], unsigned int low, unsigned int high)
+{
+  long long pivot = arr[high];
+  unsigned int i = (low - 1);  
+ 
+  for (unsigned int j = low; j <= high- 1; j++)
+    {
+      if (arr[j] <= pivot)
+        {
+	  i++;    
+	  swap(&arr[i], &arr[j]);
+        }
+    }
+  swap(&arr[i + 1], &arr[high]);
+  return (i + 1);
+}
+ 
+void quickSort(long long arr[], unsigned int low, unsigned int high)
+{
+  if (low < high)
+    {
+      unsigned int pi = partition(arr, low, high);
+
+      quickSort(arr, low, pi - 1);
+      quickSort(arr, pi + 1, high);
+    }
+}
+
+// quick sort for thread
+void *quickSort_thread(void *arg)
+{
+  struct Foo foo = *(Foo *)arg;
+  unsigned int low = foo.start_point;
+  unsigned int high = foo.end_point;
+  quickSort(foo.array_in, low, high);
+  pthread_exit(NULL);
+}
+
+
+// bubble sort function for process
+void bubble_sort(long long arr[], unsigned int n){
+  unsigned int i, j;
+  for(i = 0; i < n-1; i++){
+    for(j = 0; j < n-i-1; j++){
+      if(arr[j] > arr[j+1]){
+	swap(&arr[j], &arr[j+1]);
+      }
+    }
+  }
+}
+
+// bubble sort function for threads
+void *bubble_sort_thread(void *arg){
+  unsigned int i,j;
+  struct Foo foo = *(Foo *)arg;
+  unsigned int start_n = foo.start_point;
+  unsigned int end_n = foo.end_point;
+  
+  for(i = start_n; i < end_n; i++){
+    for(j = start_n; j < end_n - (i-start_n); j++){
+      if( foo.array_in[j] >  foo.array_in[j+1]){
+	swap(&foo.array_in[j], &foo.array_in[j+1]);
+      }
+    }
+  }
+}
+
+// merge two sorted list together
+void merge(long long a[], unsigned int m, long long b[], unsigned int n, long long sorted[]) {
+  unsigned int i, j, k;
+  j = k = 0;
+ 
+  for (i = 0; i < m + n;) {
+    if (j < m && k < n) {
+      if (a[j] < b[k]) {
+        sorted[i] = a[j];
+        j++;
+      }
+      else {
+        sorted[i] = b[k];
+        k++;
+      }
+      i++;
+    }
+    else if (j == m) {
+      for (; i < m + n;) {
+        sorted[i] = b[k];
+        k++;
+        i++;
+      }
+    }
+    else {
+      for (; i < m + n;) {
+        sorted[i] = a[j];
+        j++;
+        i++;
+      }
+    }
+  }
+}
+
+int main ( int argc, char *argv[])
+{
+    /*
+      GETOPT CMD INPUT
+     */
+    // whether we run it in thread option
+    int tFlag = 0;
+    int nFlag = 0;
+    int LFlag = 0;
+    int opt_index;
+    int _opt;
+    unsigned int number_of_process = 0;
+    char *nvalue = NULL;
+    opterr = 0;
+
+    while((_opt = getopt(argc, argv, "tLn:")) != -1){
+      switch(_opt)
+	{
+	case 't':
+	  tFlag = 1;
+	  break;
+	case 'L':
+	  LFlag = 1;
+	  break;
+        case 'n':
+	  nFlag = 1;
+	  nvalue = optarg;
+	  break;	
+	case '?':
+	  if (optopt == 'n'){
+	    fprintf(stderr, "Valid process number!\n");
+	    printf("You need to give a process number, or use defauld 4\n");
+	    exit(1);
+	  }
+	  else if (isprint(optopt)){
+	    fprintf(stderr, "Unknown option\n");
+	    exit(1);
+	  }
+	  else{
+	    fprintf(stderr, "Unkown option character\n");
+	    exit(1);
+	  }
+	default:
+	  abort();
+	}
+    }
+
+    // if no input about threading, we are using default 4
+
+    if(nvalue == NULL){
+      if(tFlag == 0 && nFlag == 0){
+	fprintf(stderr, "No Argument - Full Name:Zhengxuan Wu, Login:wuzhengx\n");
+	return 1;
+      }
+      number_of_process = 4;
+    }
+    else{
+      int temp = atoi(nvalue);
+      if(temp == 0){
+	fprintf(stderr, "No Valid process number...\n");
+	return 1;
+      }
+      else{
+	number_of_process = temp;
+	}
+    } 
+    
+    // this is for creation of multiple subprocesses
+    unsigned int i, j, k;
+    unsigned int residue;
+    unsigned int old_higher;
+    unsigned int  subarray_size;   
+    pid_t pid;
+    pid_t* children = (pid_t*) malloc(sizeof(pid_t) * number_of_process);
+    unsigned int lower_bound[number_of_process];
+    unsigned int higher_bound[number_of_process];
+    // write-in, read-out (2) pipes for each subprocess
+    int **pipes[number_of_process]; //The multi-dimensional array that contains CHILDREN pipes
+    // FILE object for pipe read and write
+    // for each children two file fd
+    FILE *pipe_write_end_c;
+    FILE *pipe_read_end_c;
+    // for parent fd
+    FILE *pipe_write_end_p[number_of_process];
+    FILE *pipe_read_end_p[number_of_process];
+    // all the long long integer to be sorted
+    long long * to_be_sort;
+    to_be_sort = (long long *) calloc(NUM, sizeof(long long));
+    // have a array to store string
+    char **to_be_sort_string;
+    to_be_sort_string = (char**) malloc(sizeof(char*)*100000000);
+    unsigned int index;
+    unsigned int size_index;
+    // FILE that stores all the integers
+    FILE *sort_number;
+    char line[190];
+    // struct list
+    struct Foo foos[number_of_process];
+
+    /*
+      PRE-PROCESSING PIPES, DATA
+     */
+    
+    // reading from the file and preprocess the data
+    size_index = 0;
+    for(i = optind; i < argc; i++){
+      // open the file for reading long long numbers
+      sort_number = fopen(argv[i], "r");
+      while(fgets(line, 190, sort_number) != NULL){
+	sscanf(line, "%lld", &to_be_sort[size_index]);
+	// just for debugging
+	//printf("This is number is added to the array: %lld\n", to_be_sort[index]);
+	size_index = size_index + 1;
+      }
+      //printf("Total # Of Numbers: %lld\n", sizeof(to_be_sort));
+      //printf("Total # Of Non-Zero Numbers: %d\n", size_index);
+      // close each file when finishing reading
+      fclose(sort_number);
+    }
+
+    
+    // define the array that store the final result
+    // initailize it with max long long int
+    long long sorted[size_index];
+    // pre-allocate the two pointers for reading
+    // writing boundaries. pre-allocated memories for
+    // partitioned to_be_sort array
+    
+    // [0,1,2,3,...,1000]
+    // lower_1 : 0 , higher_1:989
+    // lower_2 : 0 , higher_2:999
+    // ...
+    residue = size_index%number_of_process;
+    old_higher = -1;
+    for(i = 0; i < number_of_process; i++){
+      // loop variables
+      // lower -> lower bound for this partition
+      // higher -> higher bound for this partition
+      // old_higher -> indicator for loop
+      // redisue -> amount that residue from previous loop
+
+      // just for debugging
+      //printf("Residue: %d\n", residue);
+      unsigned int lower, higher;
+      if(residue == 0){
+	lower = old_higher + 1;
+	higher = lower + size_index/number_of_process - 1;
+	old_higher = higher;
+      } else {
+	lower = old_higher + 1;
+	higher = lower + size_index/number_of_process;
+	old_higher = higher;
+	residue--;
+      }
+      lower_bound[i] = lower;
+      higher_bound[i] = higher;
+    }
+
+    // single thread pure bubble sort
+    if(number_of_process == 1){
+      if(LFlag != 1){
+	printf("RUNNING ON PURE BUBBLE SORT......\n");
+	bubble_sort(to_be_sort, size_index);}
+      else{
+	printf("RUNNING ON PURE QUICK SORT......\n");
+	quickSort(to_be_sort, 0, size_index-1);
+      }
+      // print out the result
+      for(i = 0; i < size_index; i++){
+	printf("%lld\n", to_be_sort[i]);
+      }
+      
+      exit(0);
+
+    }
+    // running in multi-threading mode
+    
+    if(tFlag == 1){
+
+      printf("RUNNING ON MULTI_THREADING MODE......\n");
+      pthread_t thread[number_of_process];
+      // creation of multiple threads
+      for(i = 0; i < number_of_process; i++){
+	// creating a subarray for passing into different thread
+	foos[i].array_in = to_be_sort;
+	foos[i].start_point = lower_bound[i];
+	foos[i].end_point = higher_bound[i];
+	if(LFlag != 1){
+	  printf("RUNNING ON MULTI_THREADING MODE WITH BUBBLE SORT......\n");
+	  pthread_create(&thread[i], NULL, bubble_sort_thread, &foos[i]);
+	}else{
+	  printf("RUNNING ON MULTI_THREADING MODE WITH QUICK SORT......\n");
+	  pthread_create(&thread[i], NULL, quickSort_thread, &foos[i]);
+	}
+	
+      }
+
+      for(j = 0; j < number_of_process; j++){
+	pthread_join(thread[j], NULL);
+      }
+
+      unsigned int sort_index[number_of_process]  = {0};
+      // initialize with values of lower bounds
+      for(i = 0; i < number_of_process; i++){
+	sort_index[i] = lower_bound[i];
+      }
+
+      
+      // after sorting we can now merge those arrays
+      for(i = 0; i < size_index; i++){
+	// traverse the index find the min one
+	long long minValue = MAX;
+	unsigned int minIndex = 0;
+	for(j = 0;j < number_of_process; j++){
+	  if(sort_index[j]<= higher_bound[j] && to_be_sort[sort_index[j]] <= minValue){
+	    minValue = to_be_sort[sort_index[j]];
+	    minIndex = j;
+	  }
+	}
+        // increment only the selected one
+	sort_index[minIndex]++;
+	// assign to sorted array
+	sorted[i] = minValue;
+      }
+
+      // print out the result
+      for(i = 0; i < size_index; i++){
+	printf("%lld\n", sorted[i]);
+      }
+      
+      exit(0);
+    }
+
+   
+
+    printf("RUNNING ON MULTI_PROCESSING MODE......\n");
+    // create and allocate space for pipes
+    for(i = 0; i < number_of_process; i++){
+      // allocate space for each process before fork()
+      pipes[i] = (int**)malloc(sizeof(int*)*2);//pipe array for each children process
+      pipes[i][0] = (int*)malloc(sizeof(int)*2);//parent to children pipe for each process
+      pipes[i][1] = (int*)malloc(sizeof(int)*2);//children to parent pipe for each process
+
+      // create pipes and catching err
+      if(pipe(pipes[i][0]) == -1 || pipe(pipes[i][1]) == -1){
+	perror("Error on generating pipes for communications");
+      }
+    }
+    
+    /*
+      PROCESSING
+     */
+    char buffer[number_of_process][190];
+    // child process
+    for(i = 0; i < number_of_process; i++) {
+      // fork a new child process
+      //printf("creating loop\n");
+      pid = fork();
+      if(pid < 0) {
+        printf("Error");
+	
+        exit(1);
+      } else if (pid == 0) {
+
+	//printf("in child\n");
+	// reading from the parent
+	// for parent to children pipe, close the write(1) end, keep open the read(0) end
+	close(pipes[i][0][1]);
+	pipe_read_end_c = fdopen(pipes[i][0][0], "r");
+	// call reader function, pass in the max length, FILE*, return back an long long
+	// array for sorting
+	subarray_size = higher_bound[i] - lower_bound[i] + 1;
+	long long subarray[subarray_size];
+	char buffer[190];
+	index = 0;
+	while(fgets(buffer, 190, pipe_read_end_c) != NULL){
+	  if(buffer[0] == 's'){
+	    break;
+	  }
+	  sscanf(buffer, "%lld", &subarray[index]);
+	  // just for debugging
+	  //printf("****Iteration: %d, This is number is added to the array: %lld\n",  i+1, subarray[index]);
+	  index = index + 1;
+	}
+	
+	// finish and close
+	fclose(pipe_read_end_c);
+	close(pipes[i][0][0]);
+
+	// bubble sorting (modifying the original matrix)
+        bubble_sort(subarray, subarray_size);
+
+	
+	// writing back to the parent
+	// for children to parent pipe, close the read(0) end, keep open the write(1) end
+	close(pipes[i][1][0]);
+	pipe_write_end_c = fdopen(pipes[i][1][1], "w");
+	for(k = 0; k <= higher_bound[i]-lower_bound[i]; k++){
+	  fprintf(pipe_write_end_c, "%lld\n", subarray[k]);
+	  //printf("****This is number is added to the array: %lld\n", subarray[k]);
+	}
+	// finish and close
+	fclose(pipe_write_end_c);
+
+	exit(2);
+	
+      } else {
+	
+	children[i] = pid;
+        close(pipes[i][0][0]);
+        pipe_write_end_p[i] = fdopen(pipes[i][0][1], "w");
+
+	close(pipes[i][1][1]);
+        pipe_read_end_p[i] = fdopen(pipes[i][1][0], "r");
+      }
+    }
+
+    for(i = 0; i < number_of_process; i++){
+      // writing to the children
+      // for parent to children pipe, open the write(1) end, keep closed the read(0) end
+
+      for(k = lower_bound[i]; k <= higher_bound[i]; k++){
+	//printf("Iteration: %d, This is number is added to the array: %lld\n", i+1, to_be_sort[k]);
+	fprintf(pipe_write_end_p[i], "%lld\n", to_be_sort[k]);
+      }
+      fprintf(pipe_write_end_p[i], "%c\n", 's');
+      
+      
+      // finish and close
+      fclose(pipe_write_end_p[i]);
+
+    }
+    
+    for(i = 0; i < number_of_process; i++){
+      
+      // reading from the children
+      // for children to parent pipe, open the read(0) end, keep closed the write(1) end
+      
+
+      // call reader function, pass in the max length, FILE*, return back an long long
+      // array for sorting
+      index = 0;
+      char buffer[190];
+      while(fgets(buffer, 190, pipe_read_end_p[i]) != NULL){
+	sscanf(buffer, "%lld", &to_be_sort[lower_bound[i] + index]);
+	// just for debugging
+	//printf("**This is number is added to the array: %lld\n", to_be_sort[lower_bound[i] + index]);
+	index = index + 1;
+	
+      }
+      // finish and close
+      fclose(pipe_read_end_p[i]);
+      
+    }
+
+    // parent process
+    for(j = 0; j < number_of_process; j++){
+      int status;
+      waitpid(children[j], &status, 2);
+    }
+    
+    unsigned int sort_index[number_of_process]  = {0};
+    // initialize with values of lower bounds
+    for(i = 0; i < number_of_process; i++){
+      sort_index[i] = lower_bound[i];
+    }
+    
+    // after sorting we can now merge those arrays
+    for(i = 0; i < size_index; i++){
+      // traverse the index find the min one
+      long long minValue = MAX;
+      unsigned int minIndex = 0;
+      for(j = 0;j < number_of_process; j++){
+	if(sort_index[j]<= higher_bound[j] && to_be_sort[sort_index[j]] <= minValue){
+	  minValue = to_be_sort[sort_index[j]];
+	  minIndex = j;
+	}
+      }
+      // increment only the selected one
+      sort_index[minIndex]++;
+      // assign to sorted array
+      sorted[i] = minValue;
+    }
+
+    // print out the result
+    for(i = 0; i < size_index; i++){
+      printf("%lld\n", sorted[i]);
+    }
+    
+    exit(0);
+}
+
+
